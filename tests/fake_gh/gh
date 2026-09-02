@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fake gh for the server smoke test. Serves fixtures; sleeps on jobs to simulate a slow pass.
+F="$(dirname "$0")/../fixtures"
+# Windows: gh.cmd invokes this via `bash "%~dp0gh" %*`, so $0 carries a native
+# backslash path (MSYS bash does not convert it). Left as-is, $F embeds those
+# backslashes into the python -c string below, where Python reads them as escape
+# sequences (e.g. \U) and raises SyntaxError instead of opening the file. Forward
+# slashes are accepted by both bash and Python's open() on Windows, so normalize once
+# here rather than working around it at each call site.
+F="${F//\\//}"
+sleep "${FAKE_GH_DELAY:-0}"
+case "$*" in
+  "auth status"*) exit 0 ;;
+  *"rate_limit"*) cat "$F/rate_limit.json" ;;
+  *"/actions/runners"*) cat "$F/runners.json" ;;
+  *"/pulls?"*) python -c "import json;print(json.dumps(json.load(open('$F/pulls.json'))))" ;;
+  *"/jobs?"*) python -c "import json;print(json.dumps(json.load(open('$F/jobs_queued.json'))['jobs']))" ;;
+  *"/actions/runs?"*) cat "$F/runs.json" ;;
+  *"rerun-failed-jobs"*) echo "{}" ;;
+  *) echo "fake gh: unhandled $*" >&2; exit 1 ;;
+esac

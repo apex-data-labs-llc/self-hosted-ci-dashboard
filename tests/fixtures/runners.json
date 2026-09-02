@@ -1,0 +1,13 @@
+{
+  "total_count": 2,
+  "runners": [
+    {
+      "id": 1, "name": "runner-1", "os": "Linux", "status": "online", "busy": true,
+      "labels": [{"id": 0, "name": "self-hosted", "type": "read-only"}]
+    },
+    {
+      "id": 2, "name": "runner-2", "os": "Linux", "status": "online", "busy": false,
+      "labels": [{"id": 0, "name": "self-hosted", "type": "read-only"}]
+    }
+  ]
+}

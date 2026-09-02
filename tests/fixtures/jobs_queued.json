@@ -1,0 +1,31 @@
+{
+  "total_count": 2,
+  "jobs": [
+    {
+      "id": 9004,
+      "run_id": 501,
+      "name": "Dependency guard sweep",
+      "status": "queued",
+      "conclusion": null,
+      "runner_name": null,
+      "html_url": "https://github.com/octocat/hello-world/actions/runs/501/job/9004",
+      "created_at": "2026-09-01T10:00:00Z",
+      "started_at": null,
+      "completed_at": null,
+      "steps": []
+    },
+    {
+      "id": 9005,
+      "run_id": 501,
+      "name": "lint-typecheck-test-build",
+      "status": "queued",
+      "conclusion": null,
+      "runner_name": null,
+      "html_url": "https://github.com/octocat/hello-world/actions/runs/501/job/9005",
+      "created_at": "2026-09-01T10:01:00Z",
+      "started_at": null,
+      "completed_at": null,
+      "steps": []
+    }
+  ]
+}

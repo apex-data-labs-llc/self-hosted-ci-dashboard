@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CI dashboard</title>
+<style>
+  :root {
+    --bg: #f5f5f4; --card: #ffffff; --border: #e2e0dc; --text: #1c1b1a;
+    --muted: #706e69; --green: #1d9e75; --amber: #ba7517; --red: #a32d2d;
+    --blue: #185fa5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1b1a; --card: #262524; --border: #3a3835; --text: #ece9e4;
+      --muted: #a29e97; --green: #5dcaa5; --amber: #ef9f27; --red: #f09595;
+      --blue: #85b7eb;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", sans-serif;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 18px; font-weight: 500; margin: 0; }
+  #meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .controls { display: flex; align-items: center; gap: 16px; }
+  .controls label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  button {
+    font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button:disabled { opacity: .5; cursor: default; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; font-weight: 500; margin: 0 0 10px; }
+  .section-label { font-size: 12px; color: var(--muted); margin: 12px 0 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 400; padding: 0 8px 4px; }
+  td { padding: 6px 8px; background: var(--bg); vertical-align: top; }
+  tr td:first-child { border-radius: 6px 0 0 6px; }
+  tr td:last-child { border-radius: 0 6px 6px 0; }
+  tr + tr td { border-top: 4px solid transparent; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot.online { background: var(--green); }
+  .dot.offline { background: var(--red); }
+  .dot.unknown-dot { background: var(--muted); }
+  .empty { font-size: 13px; color: var(--muted); }
+  .error { font-size: 13px; color: var(--red); }
+  .muted { color: var(--muted); }
+
+  .banner { background: var(--card); border: 1px solid var(--amber); border-left: 4px solid var(--amber);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tabs button { border-radius: 8px 8px 0 0; border-bottom: none; }
+  .tabs button.active { background: var(--bg); font-weight: 600; border-color: var(--muted); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+    color: #fff; white-space: nowrap; }
+  .pill.st-failure { background: var(--red); }
+  .pill.st-unknown { background: #7a4fb5; }
+  .pill.st-running { background: var(--amber); }
+  .pill.st-queued { background: #5a7ea3; }
+  .pill.st-skipped { background: var(--muted); }
+  .pill.st-success { background: var(--green); }
+  .pill.st-no_ci { background: var(--muted); }
+  .age-old { color: var(--red); font-weight: 600; }
+  .wedge { color: var(--red); font-weight: 600; }
+  details { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--bg); }
+  summary { cursor: pointer; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+  summary a { color: var(--blue); text-decoration: none; }
+  summary a:hover { text-decoration: underline; }
+  .chips { display: flex; gap: 4px; flex-wrap: wrap; }
+  .chip { font-size: 10px; padding: 1px 6px; border-radius: 8px; color: #fff; }
+  .chip.no-chips { color: var(--muted); background: transparent; border: 1px dashed var(--border); }
+  .run-block { margin: 8px 0 0 4px; padding-left: 8px; border-left: 2px solid var(--border); }
+  .run-block h4 { font-size: 12px; margin: 6px 0 4px; font-weight: 600; }
+  .run-block h4 a { color: var(--blue); text-decoration: none; }
+  .job-cat { font-size: 11px; color: var(--muted); margin: 6px 0 2px; text-transform: uppercase; letter-spacing: .03em; }
+  .job-line { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 2px 0; flex-wrap: wrap; }
+  .job-line a { color: var(--blue); text-decoration: none; }
+  .job-line .job-name { flex: 1 1 auto; min-width: 160px; }
+  .job-line button { padding: 2px 8px; font-size: 11px; }
+  pre.log { font-size: 11px; background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; overflow-x: auto; max-height: 300px; margin: 4px 0; }
+  .restart-panel { margin-top: 10px; }
+  .restart-panel .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .interrupted-list { font-size: 12px; margin: 6px 0; padding-left: 18px; }
+  .caption { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div><h1>CI dashboard</h1><div id="meta" class="muted">Not loaded yet</div></div>
+  <div class="controls">
+    <span id="countdown" class="muted"></span>
+    <button id="refresh">Refresh now</button>
+  </div>
+</header>
+<div id="banner" class="banner" hidden></div>
+<nav class="tabs">
+  <button data-tab="fleet">Fleet</button>
+  <button data-tab="prs">PRs</button>
+  <button data-tab="deploys">Deploys</button>
+</nav>
+<main id="view"></main>
+
+<script>
+const TABS = ["fleet", "prs", "deploys"];
+let SNAP = null;
+let ACTIVE_TAB = localStorage.getItem("ciDashTab") || "fleet";
+if (!TABS.includes(ACTIVE_TAB)) ACTIVE_TAB = "fleet";
+
+// Repo list and the GitHub link base come from the served snapshot, never hardcoded.
+function reposOf(snap) {
+  return Object.keys((snap && snap.repos) || {});
+}
+function repoUrl(snap, repo) {
+  return `https://github.com/${snap.owner}/${repo}`;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+function fmtAge(seconds) {
+  if (seconds == null || isNaN(seconds)) return "?";
+  seconds = Math.max(0, Math.round(seconds));
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function stateClass(state) {
+  const known = ["failure", "unknown", "running", "queued", "skipped", "success", "no_ci"];
+  return known.includes(state) ? state : "unknown";
+}
+
+function pill(state, label) {
+  const cls = stateClass(state);
+  return `<span class="pill st-${cls}">${esc(label || state)}</span>`;
+}
+
+// --- category classification (mirrors collector.py's chips()/categorize_step, kept
+// approximate on purpose -- this only drives UI grouping of already-categorized step
+// data, never the chip rollups themselves, which the server computes). ---
+function jobCategory(job) {
+  const steps = job.steps || [];
+  const visible = ["lint", "typecheck", "tests", "perf", "visual", "sentinels", "build", "deploy"];
+  const counts = {};
+  for (const st of steps) {
+    if (visible.includes(st.category)) counts[st.category] = (counts[st.category] || 0) + 1;
+  }
+  let best = null, bestN = 0;
+  for (const [cat, n] of Object.entries(counts)) {
+    if (n > bestN) { best = cat; bestN = n; }
+  }
+  if (best) return best;
+  const name = (job.name || "").toLowerCase();
+  if (/lint|eslint|stylelint|ruff|flake8|prettier/.test(name)) return "lint";
+  if (/typecheck|\btsc\b|mypy/.test(name)) return "typecheck";
+  if (/lighthouse|bundle size/.test(name)) return "perf";
+  if (/visual/.test(name)) return "visual";
+  if (/sentinel|guard|drift|integrity|tripwire|census|gate|audit/.test(name)) return "sentinels";
+  if (/pytest|vitest|test/.test(name)) return "tests";
+  if (/deploy|promote|alias|rollback/.test(name)) return "deploy";
+  if (/build/.test(name)) return "build";
+  return "other";
+}
+
+function jobState(job) {
+  const status = job.status, conclusion = job.conclusion;
+  if (status === "completed") {
+    if (["failure", "cancelled", "timed_out", "action_required"].includes(conclusion)) return "failure";
+    if (conclusion === "skipped") return "skipped";
+    return "success";
+  }
+  if (status === "in_progress") return "running";
+  return "queued";
+}
+
+function fmtIso(iso) {
+  if (!iso) return "?";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+}
+
+// ---------- header / banner ----------
+
+function renderHeader(snap) {
+  const meta = document.getElementById("meta");
+  if (!snap) { meta.textContent = "Not loaded yet"; return; }
+  const fetchedEpoch = snap.fetched_at != null ? (new Date(snap.fetched_at).getTime() / 1000) : null;
+  const ageS = (snap.served_at != null && fetchedEpoch != null && !isNaN(fetchedEpoch)) ? (snap.served_at - fetchedEpoch) : null;
+  const ageTxt = ageS == null ? "no snapshot yet" : `Snapshot ${fmtAge(ageS)} old`;
+  const ageCls = ageS != null && ageS > 600 ? "age-old" : "";
+  const passTxt = snap.pass_seconds != null ? `pass ${Number(snap.pass_seconds).toFixed(1)}s` : "pass ?";
+  const rl = snap.rate_limit || {};
+  const rlTxt = `API ${rl.remaining != null ? rl.remaining.toLocaleString() : "?"} left`;
+  const probe = snap.local_probe || {};
+  let probeTxt;
+  if (probe.error) {
+    const since = probe.checked_at ? fmtIso(probe.checked_at) : "never";
+    probeTxt = `Local probe: stale since ${since} (${esc(probe.error)})`;
+  } else if (probe.checked_at) {
+    probeTxt = `Local probe: alive as of ${fmtIso(probe.checked_at)}`;
+  } else {
+    probeTxt = "Local probe: not configured";
+  }
+  meta.innerHTML = `<span class="${ageCls}">${esc(ageTxt)}</span> &middot; ${esc(passTxt)} &middot; ${esc(rlTxt)} &middot; ${probeTxt}`;
+  renderCountdown(snap);
+}
+
+function renderCountdown(snap) {
+  const el = document.getElementById("countdown");
+  if (!snap || !snap.next_pass_at) { el.textContent = ""; return; }
+  const remaining = snap.next_pass_at - (Date.now() / 1000);
+  el.textContent = remaining > 0 ? `next pass in ${fmtAge(remaining)}` : "pass due";
+}
+
+function renderBanner(snap) {
+  const el = document.getElementById("banner");
+  const parts = [];
+  if (snap && snap.partial) {
+    parts.push(`Partial pass: not all runs were fetched this cycle.${snap.partial_message ? " " + esc(snap.partial_message) : ""}`);
+  }
+  if (snap && snap.banner) {
+    parts.push(esc(snap.banner));
+  }
+  if (parts.length === 0) {
+    el.hidden = true;
+    el.innerHTML = "";
+  } else {
+    el.hidden = false;
+    el.innerHTML = parts.join("<br>");
+  }
+}
+
+// ---------- Fleet ----------
+
+function renderRunnerRow(repo, r) {
+  const wedge = r.status === "online" && r.busy && !r.current_job;
+  const localTxt = r.local_alive === null ? "unknown" : (r.local_alive ? "alive" : "not found");
+  const localCls = r.local_alive === false ? "wedge" : "";
+  let jobTxt = "&mdash;";
+  if (r.current_job) {
+    const cj = r.current_job;
+    jobTxt = `<a href="${esc(cj.url)}" target="_blank">${esc(cj.name)}</a> (${esc(cj.workflow || "")}) &mdash; running ${fmtAge(cj.duration_s)}`;
+  } else if (r.busy) {
+    jobTxt = `<span class="wedge">busy, but no current job reported</span>`;
+  }
+  return `<tr>
+    <td><span class="dot ${r.status === 'online' ? 'online' : 'offline'}"></span>${esc(r.name)}</td>
+    <td>${esc(r.status)}</td>
+    <td>${r.busy ? "yes" : "no"}${wedge ? ' <span class="wedge">&#9888; wedge</span>' : ""}</td>
+    <td class="${localCls}">${esc(localTxt)}</td>
+    <td>${jobTxt}</td>
+  </tr>`;
+}
+
+function renderRunners(repo, runners) {
+  if (!runners || runners.length === 0) return `<div class="empty">No runners registered.</div>`;
+  return `<table>
+    <tr><th>Runner</th><th>GitHub</th><th>Busy</th><th>Local process</th><th>Current job</th></tr>
+    ${runners.map(r => renderRunnerRow(repo, r)).join("")}
+  </table>`;
+}
+
+function renderQueue(snap) {
+  const items = [];
+  for (const repo of reposOf(snap)) {
+    const q = (snap.repos[repo] || {}).queue || [];
+    for (const item of q) items.push({repo, ...item});
+  }
+  items.sort((a, b) => (b.waited_s || 0) - (a.waited_s || 0));
+  if (items.length === 0) return `<div class="empty">Queue empty.</div>`;
+  const rows = items.map(it => `<tr>
+    <td>${fmtAge(it.waited_s)}</td>
+    <td><a href="${esc(it.url)}" target="_blank">${esc(it.name)}</a></td>
+    <td>${esc(it.workflow || "")}</td>
+    <td>${it.pr_number ? `<a href="${esc(repoUrl(snap, it.repo))}/pull/${it.pr_number}" target="_blank">#${it.pr_number}</a>` : "&mdash;"}</td>
+  </tr>`).join("");
+  return `<table>
+    <tr><th>Waited</th><th>Job</th><th>Workflow</th><th>PR</th></tr>
+    ${rows}
+  </table>`;
+}
+
+function restartTargets(snap) {
+  const targets = [];
+  for (const repo of reposOf(snap)) {
+    for (const r of (snap.repos[repo] || {}).runners || []) targets.push({repo, name: r.name});
+  }
+  return targets;
+}
+
+function renderRestartPanel(snap) {
+  if (!snap.restart_enabled) {
+    return `<div class="restart-panel">
+      <div class="section-label">Runner restart</div>
+      <div class="empty">Not configured (set "restart_command" in config.json to enable).</div>
+    </div>`;
+  }
+  const rs = snap.restart || {};
+  const state = rs.state || "idle";
+  const displayState = state === "arming" ? "restarting" : state;
+  const interrupted = rs.interrupted || [];
+  const interruptedHtml = interrupted.length === 0 ? "" : `<ul class="interrupted-list">
+    ${interrupted.map(it => {
+      const label = it.uncertain
+        ? `${esc(it.repo)} run ${it.run_id} &mdash; unknown whether interrupted (job list unavailable)`
+        : `${esc(it.repo)} run ${it.run_id}, job ${it.job_id}`;
+      return `<li>${label} &mdash; rerun: ${esc(it.rerun || "pending")}</li>`;
+    }).join("")}
+  </ul>`;
+  const showForce = state === "draining" || state === "stalled";
+  return `<div class="restart-panel">
+    <div class="section-label">Runner restart</div>
+    <div>state: <strong>${esc(displayState)}</strong>${rs.message ? " &mdash; " + esc(rs.message) : ""}</div>
+    ${interruptedHtml}
+    <div class="actions">
+      <button onclick="confirmRestart('idle')">Restart when idle</button>
+      <button onclick="confirmRestart('now')">Restart now</button>
+      ${showForce ? `<button onclick="confirmRestart('force')">Force now</button>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderFleet(snap) {
+  let html = "";
+  for (const repo of reposOf(snap)) {
+    const data = snap.repos[repo] || {};
+    html += `<div class="card">
+      <h2>${esc(repo)}</h2>
+      ${renderRunners(repo, data.runners)}
+    </div>`;
+  }
+  html += `<div class="card">
+    <h2>Queue (${(reposOf(snap).reduce((n, r) => n + ((snap.repos[r] || {}).queue || []).length, 0))})</h2>
+    ${renderQueue(snap)}
+  </div>`;
+  html += `<div class="card">${renderRestartPanel(snap)}</div>`;
+  document.getElementById("view").innerHTML = html;
+}
+
+function confirmRestart(mode) {
+  const snap = SNAP;
+  if (!snap || !snap.restart_enabled) return;
+  const targets = restartTargets(snap);
+  const names = targets.map(t => t.name);
+  let msg = `Restart ${names.join(", ")}?`;
+  if (mode === "now" || mode === "force") {
+    const jobs = [];
+    for (const repo of reposOf(snap)) {
+      for (const r of (snap.repos[repo] || {}).runners || []) {
+        if (r.current_job) jobs.push(r.current_job.name);
+      }
+    }
+    if (jobs.length > 0) {
+      msg += `\n\nThis will interrupt in-flight jobs:\n- ${jobs.join("\n- ")}`;
+    } else {
+      msg += `\n\nNo jobs are currently in flight on these runners.`;
+    }
+  } else {
+    msg += `\n\nThis will wait for these runners to go idle before restarting.`;
+  }
+  if (!window.confirm(msg)) return;
+  const body = mode === "force" ? {mode: "force"} : {mode};
+  fetch("/api/restart", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
+    .then(res => res.json().then(payload => {
+      if (!res.ok) window.alert("Restart request rejected: " + (payload.error || res.statusText));
+      load();
+    }))
+    .catch(err => window.alert("Restart request failed: " + err.message));
+}
+
+// ---------- PRs / Deploys (shared run rendering) ----------
+
+function renderChips(chips) {
+  const entries = Object.entries(chips || {});
+  if (entries.length === 0) {
+    return `<span class="chip no-chips">no categorized checks</span>`;
+  }
+  return `<div class="chips">${entries.map(([cat, state]) =>
+    `<span class="chip st-${stateClass(state)}" style="background: var(--${cssColorFor(state)})">${esc(cat)}: ${esc(state)}</span>`
+  ).join("")}</div>`;
+}
+
+function cssColorFor(state) {
+  const map = {failure: "red", unknown: "red", running: "amber", queued: "blue",
+    skipped: "muted", success: "green", no_ci: "muted"};
+  return map[stateClass(state)] || "muted";
+}
+
+function renderCounts(counts) {
+  if (!counts) return "";
+  return `executed ${counts.executed} (incl. ${counts.failed} failed) &middot; running ${counts.running} &middot; queued ${counts.queued} &middot; skipped ${counts.skipped}`;
+}
+
+function renderJobLine(repo, job) {
+  const st = jobState(job);
+  const timeTxt = st === "queued" ? `queued ${fmtAge(job.queued_s)}` :
+    (job.duration_s != null ? `ran ${fmtAge(job.duration_s)}` : "");
+  const logBtn = st === "failure"
+    ? `<button onclick="loadLog('${esc(repo)}', ${job.job_id}, this)">Log tail</button>`
+    : "";
+  return `<div class="job-line">
+    ${pill(st)}
+    <span class="job-name">${esc(job.name)}</span>
+    <span class="muted">${esc(job.runner_name || "")}</span>
+    <span class="muted">${esc(timeTxt)}</span>
+    <a href="${esc(job.url)}" target="_blank">run</a>
+    ${logBtn}
+  </div>`;
+}
+
+function renderRun(repo, run) {
+  const st = run.status === "completed"
+    ? (["failure", "cancelled", "timed_out", "action_required"].includes(run.conclusion) ? "failure" :
+       run.conclusion === "skipped" ? "skipped" : "success")
+    : (run.status === "in_progress" ? "running" : "queued");
+  let jobsHtml;
+  if (run.jobs_unknown) {
+    jobsHtml = `<div class="error">Job list unavailable for this run (fetch failed or pass ran out of budget).</div>`;
+  } else if (!run.jobs || run.jobs.length === 0) {
+    jobsHtml = `<div class="empty">No jobs.</div>`;
+  } else {
+    const groups = {};
+    for (const job of run.jobs) {
+      const cat = jobCategory(job);
+      (groups[cat] = groups[cat] || []).push(job);
+    }
+    jobsHtml = Object.entries(groups).map(([cat, jobs]) => `
+      <div class="job-cat">${esc(cat)}</div>
+      ${jobs.map(j => renderJobLine(repo, j)).join("")}
+    `).join("");
+  }
+  return `<div class="run-block">
+    <h4>${pill(st)} <a href="${esc(run.url)}" target="_blank">${esc(run.workflow)}</a> ${esc(run.status)}${run.conclusion ? " / " + esc(run.conclusion) : ""}</h4>
+    ${jobsHtml}
+  </div>`;
+}
+
+function loadLog(repo, jobId, btn) {
+  btn.disabled = true;
+  const container = btn.closest(".job-line");
+  fetch(`/api/log?repo=${encodeURIComponent(repo)}&job_id=${encodeURIComponent(jobId)}`)
+    .then(res => res.json().then(payload => ({ok: res.ok, payload})))
+    .then(({ok, payload}) => {
+      let pre = container.nextElementSibling;
+      if (!pre || !pre.classList || !pre.classList.contains("log")) {
+        pre = document.createElement("pre");
+        pre.className = "log";
+        container.after(pre);
+      }
+      pre.textContent = ok ? (payload.tail || "(empty log)") : `Error: ${payload.error || "failed to load log"}`;
+    })
+    .catch(err => {
+      const pre = document.createElement("pre");
+      pre.className = "log";
+      pre.textContent = `Error: ${err.message}`;
+      container.after(pre);
+    })
+    .finally(() => { btn.disabled = false; });
+}
+
+function renderPrs(snap) {
+  let html = "";
+  for (const repo of reposOf(snap)) {
+    const data = snap.repos[repo] || {};
+    const prs = data.prs || [];
+    html += `<div class="card"><h2>${esc(repo)}</h2>`;
+    if (prs.length === 0) {
+      html += `<div class="empty">No open PRs with CI.</div>`;
+    } else {
+      for (const pr of prs) {
+        html += `<details>
+          <summary>
+            ${pill(pr.rollup)}
+            <a href="${esc(pr.url)}" target="_blank">#${pr.number} ${esc(pr.title)}</a>
+            <span class="muted">${esc(pr.branch)}</span>
+            ${renderChips(pr.chips)}
+            <span class="muted">${renderCounts(pr.counts)}</span>
+          </summary>
+          ${(pr.runs || []).map(run => renderRun(repo, run)).join("")}
+        </details>`;
+      }
+    }
+    html += `</div>`;
+  }
+  document.getElementById("view").innerHTML = html;
+}
+
+function renderDeploys(snap) {
+  let html = "";
+  for (const repo of reposOf(snap)) {
+    const data = snap.repos[repo] || {};
+    const deploys = data.deploys || [];
+    html += `<div class="card">
+      <h2>${esc(repo)}</h2>
+      <div class="caption">Status as reported by GitHub Actions. Not artifact verification.</div>`;
+    if (deploys.length === 0) {
+      html += `<div class="empty">No recent deploy runs.</div>`;
+    } else {
+      for (const run of deploys) {
+        const st = run.status === "completed"
+          ? (["failure", "cancelled", "timed_out", "action_required"].includes(run.conclusion) ? "failure" :
+             run.conclusion === "skipped" ? "skipped" : "success")
+          : (run.status === "in_progress" ? "running" : "queued");
+        html += `<details>
+          <summary>
+            ${pill(st)}
+            <a href="${esc(run.url)}" target="_blank">${esc(run.workflow)}</a>
+            <span class="muted">${esc(run.head_branch)}</span>
+          </summary>
+          ${renderRun(repo, run)}
+        </details>`;
+      }
+    }
+    html += `</div>`;
+  }
+  document.getElementById("view").innerHTML = html;
+}
+
+// ---------- tabs / load / poll ----------
+
+function renderActiveTab() {
+  if (!SNAP) { document.getElementById("view").innerHTML = `<div class="empty">Not loaded yet.</div>`; return; }
+  if (ACTIVE_TAB === "fleet") renderFleet(SNAP);
+  else if (ACTIVE_TAB === "prs") renderPrs(SNAP);
+  else renderDeploys(SNAP);
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === ACTIVE_TAB));
+}
+
+function load() {
+  return fetch("/api/status")
+    .then(res => res.json())
+    .then(payload => {
+      SNAP = payload;
+      renderHeader(SNAP);
+      renderBanner(SNAP);
+      renderActiveTab();
+    })
+    .catch(err => {
+      document.getElementById("meta").textContent = "Could not reach the dashboard server: " + err.message;
+    });
+}
+
+document.querySelectorAll(".tabs button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    ACTIVE_TAB = btn.dataset.tab;
+    localStorage.setItem("ciDashTab", ACTIVE_TAB);
+    renderActiveTab();
+  });
+});
+
+document.getElementById("refresh").addEventListener("click", () => {
+  const btn = document.getElementById("refresh");
+  btn.disabled = true;
+  fetch("/api/refresh", {method: "POST"})
+    .catch(() => {})
+    .finally(() => {
+      setTimeout(() => { load(); btn.disabled = false; }, 2000);
+    });
+});
+
+setInterval(load, 30000);
+setInterval(() => renderCountdown(SNAP), 1000);
+load();
+</script>
+</body>
+</html>

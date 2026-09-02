@@ -1,0 +1,19 @@
+{
+  "owner": "octocat",
+  "repos": ["hello-world", "spoon-knife"],
+  "deploy_workflows": {
+    "hello-world": [".github/workflows/deploy.yml", ".github/workflows/rollback.yml"],
+    "spoon-knife": [".github/workflows/ci.yml"]
+  },
+  "runner_local_dirs": {
+    "hello-world": {"runner-1": "runner-1"}
+  },
+  "local_probe": null,
+  "restart_command": null,
+  "port": 8787,
+  "poll_seconds": 300,
+  "pass_budget_seconds": 150,
+  "jobs_pool_workers": 8,
+  "gh_timeout_seconds": 20,
+  "actions_log_path": "actions.log"
+}

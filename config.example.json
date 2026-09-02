@@ -1,0 +1,31 @@
+{
+  "owner": "octocat",
+  "repos": ["hello-world", "spoon-knife"],
+
+  "deploy_workflows": {
+    "hello-world": [".github/workflows/deploy.yml", ".github/workflows/rollback.yml"],
+    "spoon-knife": [".github/workflows/ci.yml"]
+  },
+
+  "runner_local_dirs": {
+    "hello-world": {
+      "runner-1": "hello-world-runner"
+    }
+  },
+
+  "local_probe": null,
+  "_local_probe_example": {
+    "command": ["wsl", "-d", "Ubuntu", "-u", "root", "--", "pgrep", "-af", "Runner.Listener"],
+    "pattern": "/root/([\\w.-]+)/bin/Runner\\.Listener"
+  },
+
+  "restart_command": null,
+  "_restart_command_example_windows_scheduled_task": ["schtasks", "/run", "/tn", "MyRunnerRestartTask"],
+
+  "port": 8787,
+  "poll_seconds": 300,
+  "pass_budget_seconds": 150,
+  "jobs_pool_workers": 8,
+  "gh_timeout_seconds": 20,
+  "actions_log_path": "actions.log"
+}
