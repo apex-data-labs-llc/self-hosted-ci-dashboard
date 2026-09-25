@@ -71,3 +71,8 @@ def test_run_raises_on_none_stdout_instead_of_returning_it(monkeypatch):
         G._run(["api", "rate_limit"], timeout=20)
 
     assert "no output" in str(exc_info.value)
+
+
+def test_classify_error_separates_secondary_rate_limit():
+    assert G.classify_error("HTTP 403: You have exceeded a secondary rate limit") == "secondary_rate_limit"
+    assert G.classify_error("HTTP 403: API rate limit exceeded for user") == "rate_limit"

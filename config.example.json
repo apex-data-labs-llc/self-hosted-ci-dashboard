@@ -27,5 +27,14 @@
   "pass_budget_seconds": 150,
   "jobs_pool_workers": 8,
   "gh_timeout_seconds": 20,
-  "actions_log_path": "actions.log"
+  "actions_log_path": "actions.log",
+
+  "min_refresh_seconds": 30,
+  "sha_cache_ttl_seconds": 900,
+  "status_poll_seconds": 120,
+  "gh_status_components": null,
+  "_gh_status_components_default": ["API Requests", "Actions", "Pull Requests", "Webhooks", "Git Operations"],
+
+  "webhook_secret": null,
+  "webhook_sweep_seconds": 1800
 }

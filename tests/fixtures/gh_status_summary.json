@@ -1,0 +1,17 @@
+{
+  "page": {"id": "synthetic", "name": "GitHub", "url": "https://www.githubstatus.com"},
+  "status": {"indicator": "minor", "description": "Partially Degraded Service"},
+  "components": [
+    {"id": "c1", "name": "Git Operations", "status": "operational"},
+    {"id": "c2", "name": "API Requests", "status": "operational"},
+    {"id": "c3", "name": "Webhooks", "status": "operational"},
+    {"id": "c4", "name": "Pull Requests", "status": "operational"},
+    {"id": "c5", "name": "Actions", "status": "partial_outage"},
+    {"id": "c6", "name": "Packages", "status": "operational"}
+  ],
+  "incidents": [
+    {"id": "i1", "name": "Delayed Actions runs", "status": "investigating", "impact": "minor",
+     "shortlink": "https://stspg.io/example"}
+  ],
+  "scheduled_maintenances": []
+}

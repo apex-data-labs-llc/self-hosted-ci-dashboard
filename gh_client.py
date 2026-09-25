@@ -39,6 +39,10 @@ def classify_error(stderr, timed_out=False):
     if timed_out:
         return "timeout"
     s = stderr or ""
+    # Checked first: GitHub's secondary (abuse) limit message also contains "rate
+    # limit", but it needs a longer back-off rather than waiting for the hourly reset.
+    if re.search(r"secondary rate limit", s, re.I):
+        return "secondary_rate_limit"
     if re.search(r"rate limit", s, re.I):
         return "rate_limit"
     if re.search(r"auth login|bad credentials|HTTP 401|not logged in", s, re.I):
@@ -108,6 +112,12 @@ def _run(args, timeout):
         # failed call it is and say so, with the real returncode attached.
         raise GhError(f"gh produced no output (returncode={result.returncode})", "other")
     return result.stdout
+
+
+def gh_text(args, timeout=20):
+    """Raw stdout of one `gh` call (e.g. a job log), with the same Windows argv
+    escaping, UTF-8 decoding and error classification as gh_json."""
+    return _run(args, timeout)
 
 
 def gh_json(args, timeout=20):

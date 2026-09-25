@@ -21,3 +21,9 @@ reads -- they are not full recordings of real API responses.
   steps until it starts).
 - `local_probe_sample.txt` -- a sample local-process listing matching the
   `local_probe.pattern` regex documented in `config.example.json`.
+- `gh_status_summary.json` -- githubstatus.com `GET /api/v2/summary.json` (Statuspage)
+  shape, with Actions in `partial_outage` and one open incident. Synthetic, like the
+  rest: written from the documented Statuspage format, not recorded from the live feed.
+  If the live feed's component names differ, update `gh_status.DEFAULT_COMPONENTS`
+  (or `gh_status_components` in config.json) -- a configured name missing from the
+  feed shows as "not in feed", never as operational.

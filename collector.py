@@ -308,6 +308,7 @@ def select_deploys(runs, repo, limit=10):
     return chosen[:limit]
 
 
+import threading
 import time as _time
 from collections import OrderedDict
 from concurrent.futures import as_completed
@@ -333,15 +334,107 @@ class RunCache:
             self._d.popitem(last=False)
 
 
+class ShaRunsCache:
+    """Per-(repo, head sha) cache of the raw runs a `head_sha=` query returned, so an
+    open PR whose CI has finished is not re-queried on every pass (that per-PR query is
+    the part of a pass that grows linearly with open PRs).
+
+    A cached entry is only trusted when ALL of these hold; otherwise the sha is queried
+    exactly as before, so the rule "never fabricate no_ci out of we-did-not-look" is
+    kept:
+      - the repo had a previous pass (so there is a "since" to compare against),
+      - every cached run for the sha is `completed` (an active run can still change),
+      - the entry is younger than `ttl` seconds (a hard bound on staleness),
+      - the recency listing this pass did not overflow: GitHub lists runs newest first,
+        so a page of RECENT_RUNS_PER_PAGE runs whose oldest was created before the
+        previous pass started contains every run created since then. A full page made
+        up entirely of runs newer than the previous pass means runs may have been
+        missed, and every sha is queried for that pass.
+    Runs seen in this pass's listings replace their cached copies (`absorb`), so a
+    re-run that shows up in the queued/in_progress listings marks its sha active and it
+    is queried again next pass."""
+
+    def __init__(self, ttl=900, limit=500):
+        self.ttl = ttl
+        self._lru = RunCache(limit=limit)
+        self._last_pass = {}
+
+    def absorb(self, repo, raw_runs):
+        for raw in raw_runs:
+            entry = self._lru.get((repo, raw.get("head_sha")))
+            if entry is None:
+                continue
+            cached_at, runs = entry
+            merged = [raw if r["id"] == raw["id"] else r for r in runs]
+            if not any(r["id"] == raw["id"] for r in runs):
+                merged.append(raw)
+            self._lru.put((repo, raw.get("head_sha")), (cached_at, merged))
+
+    def cached_runs(self, repo, sha, now, window_ok):
+        """Returns the cached raw runs for `sha` when they can be trusted, else None."""
+        if not window_ok:
+            return None
+        entry = self._lru.get((repo, sha))
+        if entry is None:
+            return None
+        cached_at, runs = entry
+        if now - cached_at > self.ttl:
+            return None
+        if any(r.get("status") != "completed" for r in runs):
+            return None
+        return runs
+
+    def store(self, repo, sha, runs, now):
+        self._lru.put((repo, sha), (now, list(runs)))
+
+    def window_ok(self, repo, recent):
+        """True when this pass's recency listing provably covers every run created
+        since this repo's previous pass (see class docstring)."""
+        prev = self._last_pass.get(repo)
+        if prev is None or recent is None:
+            return False
+        if len(recent) < RECENT_RUNS_PER_PAGE:
+            return True
+        try:
+            created = [parse_ts(r.get("created_at")) for r in recent]
+        except ValueError:
+            return False
+        if any(c is None for c in created):
+            return False
+        return min(created) <= prev
+
+    def mark_pass(self, repo, pass_started):
+        self._last_pass[repo] = pass_started
+
+
 def _repo_path(repo, suffix):
     return f"repos/{OWNER}/{repo}/{suffix}"
 
 
 PASS_BUDGET_S = 150
 JOBS_POOL_WORKERS = 8
+RECENT_RUNS_PER_PAGE = 50
 
 
-def _fetch_runs(repo, fetch, shas, errors):
+def error_kind(exc):
+    """gh_client.GhError carries a classified `kind` (rate_limit, secondary_rate_limit,
+    auth, timeout, other); anything else is `other`."""
+    return getattr(exc, "kind", None) or "other"
+
+
+def _record_error(errors, kinds, key, exc, as_list):
+    msg = str(exc)
+    if as_list:
+        lst = errors.setdefault(key, [])
+        if msg not in lst:
+            lst.append(msg)
+    else:
+        errors[key] = msg
+    if kinds is not None:
+        kinds.add(error_kind(exc))
+
+
+def _fetch_runs(repo, fetch, shas, errors, sha_cache=None, now=None, kinds=None):
     """A recency-window listing (`actions/runs?per_page=50`) can miss an older PR's run
     entirely if that PR's only CI run predates the window, so it never gets fetched and
     `no_ci` fabricates "this PR has no CI" out of "we did not look". Widening the window
@@ -350,33 +443,65 @@ def _fetch_runs(repo, fetch, shas, errors):
     in_progress listings the queue and fleet views still need. Everything is unioned by
     run id.
 
+    With a `sha_cache` (see ShaRunsCache), a sha whose runs are all completed and were
+    fetched recently is served from the cache instead of re-queried; the cache's own
+    rules decide when that is provably safe, and fall back to querying otherwise.
+
     Each suffix (including each per-sha query) is fetched in its own try/except: one
     PR's sha query failing must not blank every other PR's runs, the queued listing, or
     the in-progress listing. Failures are recorded per suffix under `errors["runs"]`
     (a list, not a single string, so distinct failures are not dropped) rather than
     aborting the whole fetch."""
     seen = OrderedDict()
-    suffixes = [
-        "actions/runs?per_page=50",
+    listings = [
+        f"actions/runs?per_page={RECENT_RUNS_PER_PAGE}",
         "actions/runs?status=queued&per_page=100",
         "actions/runs?status=in_progress&per_page=100",
     ]
-    suffixes += [f"actions/runs?head_sha={sha}&per_page=100" for sha in shas]
-    for suffix in suffixes:
+    recent = None
+    for i, suffix in enumerate(listings):
         try:
             data = fetch(["api", _repo_path(repo, suffix)]) or {}
         except Exception as exc:
-            lst = errors.setdefault("runs", [])
-            msg = str(exc)
-            if msg not in lst:
-                lst.append(msg)
+            _record_error(errors, kinds, "runs", exc, as_list=True)
             continue
-        for raw in data.get("workflow_runs", []):
+        runs = data.get("workflow_runs", [])
+        if i == 0:
+            recent = runs
+        for raw in runs:
             seen.setdefault(raw["id"], raw)
+
+    to_query = list(shas)
+    if sha_cache is not None:
+        sha_cache.absorb(repo, list(seen.values()))
+        window_ok = sha_cache.window_ok(repo, recent)
+        to_query = []
+        for sha in shas:
+            cached = sha_cache.cached_runs(repo, sha, now, window_ok)
+            if cached is None:
+                to_query.append(sha)
+                continue
+            for raw in cached:
+                seen.setdefault(raw["id"], raw)
+
+    for sha in to_query:
+        try:
+            data = fetch(["api", _repo_path(repo, f"actions/runs?head_sha={sha}&per_page=100")]) or {}
+        except Exception as exc:
+            _record_error(errors, kinds, "runs", exc, as_list=True)
+            continue
+        runs = data.get("workflow_runs", [])
+        for raw in runs:
+            seen.setdefault(raw["id"], raw)
+        if sha_cache is not None:
+            sha_cache.store(repo, sha, runs, now)
+    if sha_cache is not None and recent is not None:
+        sha_cache.mark_pass(repo, now)
     return list(seen.values())
 
 
-def _fetch_jobs_for(repo, raw_runs, paginate, cache, now, pool, errors, deadline, time_fn, budget_skipped):
+def _fetch_jobs_for(repo, raw_runs, paginate, cache, now, pool, errors, deadline, time_fn, budget_skipped,
+                    kinds=None):
     """Returns (jobs_by_run, unknown_run_ids). A run id lands in `unknown_run_ids` when
     its jobs could not be retrieved -- a `gh` failure or a pass-budget cutoff -- so the
     caller can mark it `jobs_unknown` and the run reads as genuinely unknown rather than
@@ -409,10 +534,7 @@ def _fetch_jobs_for(repo, raw_runs, paginate, cache, now, pool, errors, deadline
         try:
             jobs = [normalize_job(j, now) for j in fut.result()]
         except Exception as exc:  # one run failing must not sink the pass
-            msg = str(exc)
-            lst = errors.setdefault("jobs", [])
-            if msg not in lst:
-                lst.append(msg)
+            _record_error(errors, kinds, "jobs", exc, as_list=True)
             unknown_ids.add(raw["id"])
             continue
         jobs_by_run[raw["id"]] = jobs
@@ -422,10 +544,12 @@ def _fetch_jobs_for(repo, raw_runs, paginate, cache, now, pool, errors, deadline
 
 
 def collect_repo(repo, fetch, paginate, cache, now, local_dirs, pool,
-                  deadline=None, time_fn=_time.time, budget_skipped=None):
+                  deadline=None, time_fn=_time.time, budget_skipped=None, sha_cache=None):
     """Per-repo section. Each of runners/prs/runs is fetched independently: a failure in
     one must never blank the others, and the real error text is preserved in `errors`
     rather than a fabricated default (see build_snapshot for the same rule on rate_limit).
+    `error_kinds` lists the classified kind of every error (see error_kind), so callers
+    branch on the kind instead of sniffing message text.
 
     `deadline`/`time_fn`/`budget_skipped` implement the per-pass wall-clock budget:
     `deadline` is an absolute time_fn() value past which no new jobs fetch is issued,
@@ -435,19 +559,20 @@ def collect_repo(repo, fetch, paginate, cache, now, local_dirs, pool,
     if budget_skipped is None:
         budget_skipped = []
     errors = {}
+    kinds = set()
     raw_runners, raw_prs, raw_runs = [], [], []
     try:
         raw_runners = (fetch(["api", _repo_path(repo, "actions/runners")]) or {}).get("runners", [])
     except Exception as exc:
-        errors["runners"] = str(exc)
+        _record_error(errors, kinds, "runners", exc, as_list=False)
     try:
         raw_prs = paginate(_repo_path(repo, "pulls?state=open&per_page=100"), ".")
     except Exception as exc:
-        errors["prs"] = str(exc)
+        _record_error(errors, kinds, "prs", exc, as_list=False)
     shas = [p["head"]["sha"] for p in raw_prs if p.get("head", {}).get("sha")]
-    raw_runs = _fetch_runs(repo, fetch, shas, errors)
+    raw_runs = _fetch_runs(repo, fetch, shas, errors, sha_cache=sha_cache, now=now, kinds=kinds)
     jobs_by_run, unknown_ids = _fetch_jobs_for(
-        repo, raw_runs, paginate, cache, now, pool, errors, deadline, time_fn, budget_skipped
+        repo, raw_runs, paginate, cache, now, pool, errors, deadline, time_fn, budget_skipped, kinds=kinds
     )
     runs = [
         {**normalize_run(raw, jobs_by_run.get(raw["id"], [])), "jobs_unknown": raw["id"] in unknown_ids}
@@ -459,16 +584,51 @@ def collect_repo(repo, fetch, paginate, cache, now, local_dirs, pool,
     prs = [build_pr(raw, runs_by_sha.get(raw["head"]["sha"], [])) for raw in raw_prs]
     prs.sort(key=lambda p: p["number"], reverse=True)
     pr_by_sha = {p["sha"]: p["number"] for p in prs}
+    created = [r["created_at"] for r in runs if r.get("created_at")]
     return {
         "runners": attach_runner_jobs(raw_runners, runs, repo, local_dirs),
         "prs": prs,
         "deploys": select_deploys(runs, repo),
         "queue": build_queue(runs, pr_by_sha),
         "errors": errors,
+        "error_kinds": sorted(kinds),
+        "fetched_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        "latest_run_created_at": max(created) if created else None,
     }
 
 
-def build_snapshot(fetch, paginate, cache, local_probe, now, pool, time_fn=_time.time):
+class _CallCounter:
+    """Wraps fetch/paginate to count invocations (one per `gh` process). A paginated
+    call can span several HTTP requests, so this is a floor on real API requests, not
+    an exact count. Thread-safe: paginate runs on the jobs pool."""
+
+    def __init__(self, fetch, paginate):
+        self._fetch, self._paginate = fetch, paginate
+        self._lock = threading.Lock()
+        self.n = 0
+
+    def _tick(self):
+        with self._lock:
+            self.n += 1
+
+    def fetch(self, args):
+        self._tick()
+        return self._fetch(args)
+
+    def paginate(self, path, jq):
+        self._tick()
+        return self._paginate(path, jq)
+
+
+BANNER_BY_KIND = {
+    "rate_limit": "GitHub rate limit exceeded; resets at {reset_at}",
+    "secondary_rate_limit": "GitHub secondary rate limit hit; backing off",
+    "auth": "gh authentication expired: run `gh auth login`",
+}
+
+
+def build_snapshot(fetch, paginate, cache, local_probe, now, pool, time_fn=_time.time,
+                   repos=None, sha_cache=None):
     """Full snapshot. `rate_limit` is fetched independently of the per-repo passes: if it
     fails, `remaining` stays None (never 0 or a guessed value) and the real error text
     becomes the banner. `rate_limit.reset_at` is converted to a UTC ISO 8601 string,
@@ -486,10 +646,16 @@ def build_snapshot(fetch, paginate, cache, local_probe, now, pool, time_fn=_time
     The whole pass is given a `PASS_BUDGET_S` wall-clock budget. Once it is exceeded, no
     further jobs fetches are issued; every run cut by the budget is marked unknown
     (never a fabricated "no jobs"), and the snapshot carries `partial=True` plus a
-    message naming how many runs were not fetched."""
+    message naming how many runs were not fetched.
+
+    `repos` limits the pass to a subset of REPOS (a webhook-triggered partial pass);
+    `api_calls` counts the fetch/paginate invocations this pass made."""
+    counter = _CallCounter(fetch, paginate)
+    fetch, paginate = counter.fetch, counter.paginate
     t0 = time_fn()
     deadline = t0 + PASS_BUDGET_S
     banner = None
+    kinds = set()
     rate = {"remaining": None, "reset_at": None}
     try:
         core = (fetch(["api", "rate_limit"]) or {})["resources"]["core"]
@@ -497,21 +663,18 @@ def build_snapshot(fetch, paginate, cache, local_probe, now, pool, time_fn=_time
         rate = {"remaining": core["remaining"], "reset_at": reset_at}
     except Exception as exc:
         banner = f"GitHub API problem: {exc}"
-    repos = {}
+        kinds.add(error_kind(exc))
+    out = {}
     budget_skipped = []
-    for repo in REPOS:
-        repos[repo] = collect_repo(
+    for repo in (REPOS if repos is None else repos):
+        out[repo] = collect_repo(
             repo, fetch, paginate, cache, now, local_probe.get("dirs"), pool,
-            deadline=deadline, time_fn=time_fn, budget_skipped=budget_skipped,
+            deadline=deadline, time_fn=time_fn, budget_skipped=budget_skipped, sha_cache=sha_cache,
         )
-        for key, msgs in repos[repo]["errors"].items():
-            texts = msgs if isinstance(msgs, list) else [msgs]
-            for msg in texts:
-                low = msg.lower()
-                if "rate limit" in low:
-                    banner = f"GitHub rate limit exceeded; resets at {rate['reset_at']}"
-                elif "auth" in low or "credentials" in low:
-                    banner = "gh authentication expired: run `gh auth login`"
+        for kind in out[repo]["error_kinds"]:
+            kinds.add(kind)
+            if kind in BANNER_BY_KIND:
+                banner = BANNER_BY_KIND[kind].format(reset_at=rate["reset_at"])
     snap = {
         "fetched_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "pass_seconds": round(time_fn() - t0, 1),
@@ -519,8 +682,10 @@ def build_snapshot(fetch, paginate, cache, local_probe, now, pool, time_fn=_time
         "banner": banner,
         "owner": OWNER,
         "local_probe": local_probe,
-        "repos": repos,
+        "repos": out,
         "partial": False,
+        "api_calls": counter.n,
+        "error_kinds": sorted(kinds),
     }
     if budget_skipped:
         snap["partial"] = True
@@ -528,3 +693,43 @@ def build_snapshot(fetch, paginate, cache, local_probe, now, pool, time_fn=_time
             f"{len(budget_skipped)} run(s) not fetched within the {PASS_BUDGET_S}s pass budget"
         )
     return snap
+
+
+def _iso_to_epoch(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        return None
+
+
+def next_interval(base_s, snap, now, gh_outage=False, cap_s=3600):
+    """How long to wait before the next full pass, and why (None when no backoff).
+
+    Backs off instead of spending calls that are likely to fail:
+      - primary rate limit hit, or `remaining` below 3x what the last pass used: wait
+        for the reported reset (or 2x the base interval when reset_at is unknown);
+      - secondary rate limit hit: 2x the base interval;
+      - GitHub reports a major outage of a component this dashboard depends on: 2x.
+    Never shorter than `base_s`, never longer than `cap_s`."""
+    interval, reasons = base_s, []
+    kinds = set(snap.get("error_kinds") or [])
+    rate = snap.get("rate_limit") or {}
+    remaining, calls = rate.get("remaining"), snap.get("api_calls")
+    low = remaining is not None and bool(calls) and remaining < 3 * calls
+    if "rate_limit" in kinds or low:
+        reset = _iso_to_epoch(rate.get("reset_at"))
+        if reset is not None and reset > now:
+            interval = max(interval, reset - now + 5)
+            reasons.append(f"API quota low ({remaining} left); waiting for reset at {rate['reset_at']}")
+        else:
+            interval = max(interval, 2 * base_s)
+            reasons.append(f"API quota low ({remaining} left); polling at half rate")
+    if "secondary_rate_limit" in kinds:
+        interval = max(interval, 2 * base_s)
+        reasons.append("secondary rate limit hit; polling at half rate")
+    if gh_outage:
+        interval = max(interval, 2 * base_s)
+        reasons.append("GitHub reports a major outage; polling at half rate")
+    return min(interval, cap_s), ("; ".join(reasons) or None)

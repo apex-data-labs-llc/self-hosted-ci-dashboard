@@ -54,6 +54,13 @@
 
   .banner { background: var(--card); border: 1px solid var(--amber); border-left: 4px solid var(--amber);
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; }
+  .banner.bad { border-color: var(--red); border-left-color: var(--red); }
+  .health { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; font-size: 12px;
+    color: var(--muted); margin: -8px 0 12px; }
+  .health a { color: var(--blue); text-decoration: none; }
+  .dot.st-ok { background: var(--green); }
+  .dot.st-warn { background: var(--amber); }
+  .dot.st-bad { background: var(--red); }
   .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
   .tabs button { border-radius: 8px 8px 0 0; border-bottom: none; }
   .tabs button.active { background: var(--bg); font-weight: 600; border-color: var(--muted); }
@@ -100,6 +107,7 @@
     <button id="refresh">Refresh now</button>
   </div>
 </header>
+<div id="ghhealth" class="health"></div>
 <div id="banner" class="banner" hidden></div>
 <nav class="tabs">
   <button data-tab="fleet">Fleet</button>
@@ -205,7 +213,8 @@ function renderHeader(snap) {
   const ageCls = ageS != null && ageS > 600 ? "age-old" : "";
   const passTxt = snap.pass_seconds != null ? `pass ${Number(snap.pass_seconds).toFixed(1)}s` : "pass ?";
   const rl = snap.rate_limit || {};
-  const rlTxt = `API ${rl.remaining != null ? rl.remaining.toLocaleString() : "?"} left`;
+  const rlTxt = `API ${rl.remaining != null ? rl.remaining.toLocaleString() : "?"} left`
+    + (snap.api_calls != null ? `, ${snap.api_calls} calls last pass` : "");
   const probe = snap.local_probe || {};
   let probeTxt;
   if (probe.error) {
@@ -216,20 +225,78 @@ function renderHeader(snap) {
   } else {
     probeTxt = "Local probe: not configured";
   }
-  meta.innerHTML = `<span class="${ageCls}">${esc(ageTxt)}</span> &middot; ${esc(passTxt)} &middot; ${esc(rlTxt)} &middot; ${probeTxt}`;
+  const wh = snap.webhooks || {};
+  let whTxt = "";
+  if (wh.enabled) {
+    whTxt = " &middot; Webhooks: " + (wh.missed ? '<span class="wedge">missing deliveries</span>'
+      : wh.last_at ? esc(`last ${fmtAge(snap.served_at - wh.last_at)} ago`) : "none received yet");
+  }
+  meta.innerHTML = `<span class="${ageCls}">${esc(ageTxt)}</span> &middot; ${esc(passTxt)} &middot; ${esc(rlTxt)} &middot; ${probeTxt}${whTxt}`;
   renderCountdown(snap);
 }
 
+let REFRESH_NOTE = null, REFRESH_NOTE_UNTIL = 0;
+
 function renderCountdown(snap) {
   const el = document.getElementById("countdown");
+  if (REFRESH_NOTE && Date.now() < REFRESH_NOTE_UNTIL) { el.textContent = REFRESH_NOTE; return; }
   if (!snap || !snap.next_pass_at) { el.textContent = ""; return; }
   const remaining = snap.next_pass_at - (Date.now() / 1000);
-  el.textContent = remaining > 0 ? `next pass in ${fmtAge(remaining)}` : "pass due";
+  const col = snap.collector || {};
+  const txt = col.pass_running ? "pass running" : remaining > 0 ? `next pass in ${fmtAge(remaining)}` : "pass due";
+  el.textContent = txt + (col.backoff_reason ? " (backing off)" : "");
+}
+
+// Statuspage component states: operational, degraded_performance, partial_outage,
+// major_outage, under_maintenance. Anything unread (null / stale) renders grey, never green.
+function healthDotClass(status, stale) {
+  if (stale || status == null) return "unknown-dot";
+  if (status === "operational") return "st-ok";
+  if (status === "degraded_performance" || status === "under_maintenance") return "st-warn";
+  return "st-bad";
+}
+
+function renderHealth(snap) {
+  const el = document.getElementById("ghhealth");
+  const h = (snap && snap.gh_health) || {};
+  if (!h.enabled) { el.innerHTML = ""; return; }
+  const parts = [`<a href="${esc(h.page_url || "https://www.githubstatus.com")}" target="_blank">GitHub status</a>`];
+  if (!h.components) {
+    parts.push(`<span><span class="dot unknown-dot"></span>unknown (${esc(h.error || "not read yet")})</span>`);
+  } else {
+    for (const c of h.components) {
+      const label = c.in_feed === false ? "not in feed" : (c.status || "unknown").replace(/_/g, " ");
+      parts.push(`<span title="${esc(label)}"><span class="dot ${healthDotClass(c.status, h.stale)}"></span>${esc(c.name)}</span>`);
+    }
+    if (h.stale) parts.push(`<span class="wedge">stale since ${esc(fmtIso(h.checked_at))} (${esc(h.error || "")})</span>`);
+    for (const inc of h.incidents || []) {
+      parts.push(`<a href="${esc(inc.url || h.page_url)}" target="_blank">&#9888; ${esc(inc.name)} (${esc(inc.impact || inc.status || "")})</a>`);
+    }
+  }
+  el.innerHTML = parts.join("");
 }
 
 function renderBanner(snap) {
   const el = document.getElementById("banner");
   const parts = [];
+  let bad = false;
+  const col = (snap && snap.collector) || {};
+  if (snap && snap.collector && !col.alive) {
+    bad = true;
+    parts.push("The collector thread has stopped: this data is no longer being refreshed. Restart server.py.");
+  } else if (col.stale) {
+    bad = true;
+    parts.push("Data is stale: the last collector pass is overdue.");
+  }
+  if (col.last_error) {
+    bad = true;
+    parts.push(`Last pass failed: ${esc(col.last_error)}`);
+  }
+  if (col.backoff_reason) parts.push(`Backing off: ${esc(col.backoff_reason)}`);
+  const health = (snap && snap.gh_health) || {};
+  if (health.note) parts.push(esc(health.note));
+  const wh = (snap && snap.webhooks) || {};
+  if (wh.missed) parts.push(`Webhooks: ${esc(wh.missed)}`);
   if (snap && snap.partial) {
     parts.push(`Partial pass: not all runs were fetched this cycle.${snap.partial_message ? " " + esc(snap.partial_message) : ""}`);
   }
@@ -241,6 +308,7 @@ function renderBanner(snap) {
     el.innerHTML = "";
   } else {
     el.hidden = false;
+    el.classList.toggle("bad", bad);
     el.innerHTML = parts.join("<br>");
   }
 }
@@ -547,6 +615,7 @@ function load() {
     .then(payload => {
       SNAP = payload;
       renderHeader(SNAP);
+      renderHealth(SNAP);
       renderBanner(SNAP);
       renderActiveTab();
     })
@@ -567,6 +636,11 @@ document.getElementById("refresh").addEventListener("click", () => {
   const btn = document.getElementById("refresh");
   btn.disabled = true;
   fetch("/api/refresh", {method: "POST"})
+    .then(res => res.status === 429 ? res.json().then(b => {
+      REFRESH_NOTE = b.error || "refreshed too recently";
+      REFRESH_NOTE_UNTIL = Date.now() + 5000;
+      renderCountdown(SNAP);
+    }) : null)
     .catch(() => {})
     .finally(() => {
       setTimeout(() => { load(); btn.disabled = false; }, 2000);

@@ -343,7 +343,9 @@ def _collect(fake, cache=None):
 
 def test_collect_repo_produces_all_sections():
     section, _ = _collect(FakeGh())
-    assert set(section) == {"runners", "prs", "deploys", "queue", "errors"}
+    assert set(section) == {"runners", "prs", "deploys", "queue", "errors", "error_kinds",
+                            "fetched_at", "latest_run_created_at"}
+    assert section["error_kinds"] == []
     assert section["errors"] == {}
     assert section["prs"] and all("rollup" in p for p in section["prs"])
 
@@ -545,3 +547,198 @@ def test_finding5_rate_limit_reset_at_stays_none_on_failure():
             {"checked_at": None, "error": None, "dirs": None}, time.time(), pool,
         )
     assert snap["rate_limit"] == {"remaining": None, "reset_at": None}
+
+
+# ---------------------------------------------------------------------------
+# API-call accounting, typed error kinds, head-sha cache, and backoff.
+# ---------------------------------------------------------------------------
+
+
+def _probe_off():
+    return {"checked_at": None, "error": None, "dirs": None}
+
+
+def test_build_snapshot_counts_api_calls():
+    fake = FakeGh()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        snap = C.build_snapshot(fake.fetch, fake.paginate, C.RunCache(), _probe_off(), time.time(), pool)
+    assert snap["api_calls"] == len(fake.calls) > 0
+
+
+def test_error_kinds_drive_the_banner_not_message_text():
+    import gh_client as G
+    fake = FakeGh(fail={"repos/octocat/hello-world/actions/runners":
+                        G.GhError("You have exceeded a secondary rate limit", "secondary_rate_limit")})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        snap = C.build_snapshot(fake.fetch, fake.paginate, C.RunCache(), _probe_off(), time.time(), pool)
+    assert "secondary_rate_limit" in snap["error_kinds"]
+    assert snap["repos"]["hello-world"]["error_kinds"] == ["secondary_rate_limit"]
+    assert "secondary rate limit" in snap["banner"]
+
+
+def test_build_snapshot_can_run_a_subset_of_repos():
+    fake = FakeGh()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        snap = C.build_snapshot(fake.fetch, fake.paginate, C.RunCache(), _probe_off(), time.time(), pool,
+                                repos=["hello-world"])
+    assert set(snap["repos"]) == {"hello-world"}
+    assert not any("spoon-knife" in c for c in fake.calls)
+
+
+def _completed_fake(**kw):
+    fake = FakeGh(**kw)
+    for r in fake.runs:
+        r["status"] = "completed"
+    return fake
+
+
+def _sha_calls(fake):
+    return [c for c in fake.calls if "head_sha=" in c]
+
+
+def _collect_at(fake, now, sha_cache, cache=None):
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return C.collect_repo("hello-world", fake.fetch, fake.paginate, cache or C.RunCache(), now, None, pool,
+                              sha_cache=sha_cache)
+
+
+# Fixture runs are created in 2026; a pass "now" after that means the recency page's
+# oldest run predates the previous pass (the normal, non-overflow case).
+LATER = 2_000_000_000
+
+
+def test_sha_cache_skips_head_sha_queries_for_finished_prs():
+    n_prs = len(load("pulls.json"))
+    sha_cache = C.ShaRunsCache(ttl=900)
+    first = _completed_fake()
+    s1 = _collect_at(first, LATER, sha_cache)
+    assert len(_sha_calls(first)) == n_prs
+    second = _completed_fake()
+    s2 = _collect_at(second, LATER + 300, sha_cache)
+    assert _sha_calls(second) == []
+    # Same PR view either way: the cache served the same runs the queries returned.
+    assert [(p["number"], p["rollup"]) for p in s2["prs"]] == [(p["number"], p["rollup"]) for p in s1["prs"]]
+
+
+def test_sha_cache_still_serves_old_runs_outside_the_recency_window():
+    # The finding-1 guarantee must survive caching: a run reachable ONLY via head_sha
+    # stays attached to its PR on a cached pass.
+    target = load("pulls.json")[0]
+    old_run = {"id": 999999002, "name": "CI", "path": ".github/workflows/test.yml", "event": "push",
+               "head_branch": target["head"]["ref"], "head_sha": target["head"]["sha"], "status": "completed",
+               "conclusion": "success", "html_url": "u", "created_at": "2020-01-01T00:00:00Z", "run_attempt": 1}
+    sha_cache = C.ShaRunsCache()
+    _collect_at(_completed_fake(extra_runs=[old_run]), LATER, sha_cache)
+    fake = _completed_fake(extra_runs=[old_run])
+    section = _collect_at(fake, LATER + 300, sha_cache)
+    assert _sha_calls(fake) == []
+    pr = next(p for p in section["prs"] if p["number"] == target["number"])
+    assert any(r["run_id"] == 999999002 for r in pr["runs"])
+
+
+def test_sha_cache_requeries_after_ttl():
+    sha_cache = C.ShaRunsCache(ttl=900)
+    _collect_at(_completed_fake(), LATER, sha_cache)
+    fake = _completed_fake()
+    _collect_at(fake, LATER + 901, sha_cache)
+    assert len(_sha_calls(fake)) == len(load("pulls.json"))
+
+
+def test_sha_cache_requeries_while_a_run_is_not_completed():
+    pr_sha = load("pulls.json")[0]["head"]["sha"]
+
+    def active_fake():
+        fake = _completed_fake()
+        next(r for r in fake.runs if r["head_sha"] == pr_sha)["status"] = "in_progress"
+        return fake
+
+    sha_cache = C.ShaRunsCache()
+    _collect_at(active_fake(), LATER, sha_cache)
+    fake = active_fake()
+    _collect_at(fake, LATER + 300, sha_cache)
+    queried = [c for c in _sha_calls(fake) if pr_sha in c]
+    assert queried, "a sha with an active run must be re-queried"
+    assert len(_sha_calls(fake)) == 1, "the other (finished) PR is served from the cache"
+
+
+def test_sha_cache_requeries_when_a_listing_shows_a_rerun():
+    sha_cache = C.ShaRunsCache()
+    _collect_at(_completed_fake(), LATER, sha_cache)
+    fake = _completed_fake()
+    pr_sha = load("pulls.json")[0]["head"]["sha"]
+    rerun = next(r for r in fake.runs if r["head_sha"] == pr_sha)
+    rerun["status"] = "in_progress"
+    _collect_at(fake, LATER + 300, sha_cache)          # absorbs the in_progress copy
+    third = _completed_fake()
+    third.runs = [r for r in third.runs if r["head_sha"] != pr_sha]  # it fell out of the listings
+    _collect_at(third, LATER + 600, sha_cache)
+    assert any(pr_sha in c for c in _sha_calls(third))
+
+
+def test_sha_cache_requeries_everything_when_the_recency_page_overflows():
+    class Overflow(FakeGh):
+        def fetch(self, args):
+            if "per_page=50" in args[1] and "head_sha" not in args[1]:
+                self.calls.append(args[1])
+                base = self.runs[0]
+                return {"workflow_runs": [{**base, "id": 700000 + i, "head_sha": f"{i:040x}",
+                                           "created_at": "2030-01-01T00:00:00Z"} for i in range(50)]}
+            return super().fetch(args)
+
+    sha_cache = C.ShaRunsCache()
+    # Previous pass at 2029: every one of the 50 newest runs is newer than it, so runs
+    # created since then may have been pushed off the page.
+    _collect_at(_completed_fake(), 1_861_920_000, sha_cache)
+    fake = Overflow()
+    for r in fake.runs:
+        r["status"] = "completed"
+    _collect_at(fake, 1_861_920_300, sha_cache)
+    assert len(_sha_calls(fake)) == len(load("pulls.json"))
+
+
+def test_sha_cache_first_pass_and_failed_listing_query_everything():
+    sha_cache = C.ShaRunsCache()
+    fake = _completed_fake(fail={"repos/octocat/hello-world/actions/runs?per_page=50": RuntimeError("down")})
+    _collect_at(fake, LATER, sha_cache)
+    assert len(_sha_calls(fake)) == len(load("pulls.json"))
+    fake2 = _completed_fake(fail={"repos/octocat/hello-world/actions/runs?per_page=50": RuntimeError("down")})
+    _collect_at(fake2, LATER + 300, sha_cache)
+    assert len(_sha_calls(fake2)) == len(load("pulls.json")), "no provable window -> no cache use"
+
+
+NOW = 1_800_000_000
+
+
+def _iso(epoch):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def test_next_interval_no_backoff_by_default():
+    snap = {"rate_limit": {"remaining": 4900, "reset_at": _iso(NOW + 600)}, "api_calls": 40, "error_kinds": []}
+    assert C.next_interval(300, snap, NOW) == (300, None)
+
+
+def test_next_interval_waits_for_reset_when_quota_is_low():
+    snap = {"rate_limit": {"remaining": 50, "reset_at": _iso(NOW + 1200)}, "api_calls": 40, "error_kinds": []}
+    interval, reason = C.next_interval(300, snap, NOW)
+    assert interval == 1205 and "quota low" in reason
+
+
+def test_next_interval_halves_rate_without_a_usable_reset():
+    snap = {"rate_limit": {"remaining": None, "reset_at": None}, "api_calls": 40, "error_kinds": ["rate_limit"]}
+    assert C.next_interval(300, snap, NOW)[0] == 600
+    snap = {"rate_limit": {"remaining": 10, "reset_at": _iso(NOW - 5)}, "api_calls": 40, "error_kinds": []}
+    assert C.next_interval(300, snap, NOW)[0] == 600
+
+
+def test_next_interval_unknown_remaining_is_not_treated_as_low():
+    snap = {"rate_limit": {"remaining": None, "reset_at": None}, "api_calls": 40, "error_kinds": []}
+    assert C.next_interval(300, snap, NOW) == (300, None)
+
+
+def test_next_interval_secondary_limit_outage_and_cap():
+    snap = {"rate_limit": {}, "api_calls": 1, "error_kinds": ["secondary_rate_limit"]}
+    assert C.next_interval(300, snap, NOW)[0] == 600
+    assert C.next_interval(300, {"rate_limit": {}}, NOW, gh_outage=True)[0] == 600
+    assert C.next_interval(3000, {"rate_limit": {}}, NOW, gh_outage=True)[0] == 3600
