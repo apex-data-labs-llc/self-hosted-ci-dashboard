@@ -1,0 +1,29 @@
+name: bors CI
+
+# bors merge queue (pattern copied from claude-governance's and the-brain-platform's bors-ci.yml).
+# bors pushes a merge commit M (parents: base branch, PR head) to automation/bors/try or
+# automation/bors/auto and fast-forwards the base branch only if EVERY workflow run on M
+# succeeds (rust-bors.toml: timeout 3600 s, min_ci_time 8 s). Nothing else may trigger on these
+# branches; a deploy workflow doing so would ship an unmerged commit.
+#
+# Runs the full pytest suite (tests/, stdlib server + fake gh fixtures) on M. Measured locally
+# 2026-10-13: 100 passed in 10 s.
+on:
+  push:
+    branches: [automation/bors/try, automation/bors/auto]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt
+      # No -x: the whole suite runs and every failure is reported.
+      - run: python -m pytest -q
