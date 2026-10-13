@@ -1,0 +1,26 @@
+# bors merge queue config (shape copied from the-brain-platform's rust-bors.toml and
+# claude-governance's; the-brain Drive docs/superpowers/specs/2026-09-23-bors-merge-queue-design.md).
+#
+# This file MUST exist on the default branch of EVERY repository the the-brain-bors GitHub App
+# is installed on: bors exits at startup when any installed repo lacks it, which takes the merge
+# queue down for every repo (the-brain doctrine/BORS.md, "Add a repo"). Added 2026-10-13 after
+# the App installation was widened to all org repositories and bors crash-looped on this one.
+#
+# timeout: 3600 s. Not measured on THIS repo. Re-derive from measured wall time after ~20 bors
+# builds, as the platform did (max x 1.5).
+# min_ci_time: bors applies it to EACH workflow. 8 s matches the platform: above a
+# skipped-everything run, below any real run.
+timeout = 3600
+min_ci_time = 8
+
+# `@bors r+` enqueues; bors tests the merge commit on automation/bors/auto and fast-forwards the
+# base branch only if every workflow run on that commit succeeds. A merge therefore needs a
+# workflow that triggers on push to automation/bors/try and automation/bors/auto (see
+# claude-governance .github/workflows/bors-ci.yml); without one, an approved PR waits out the
+# timeout and fails.
+merge_queue_enabled = true
+report_merge_conflicts = true
+
+[labels]
+approved = ["+approved"]
+unapproved = ["-approved"]
